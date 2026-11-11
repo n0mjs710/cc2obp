@@ -30,6 +30,10 @@ void translator_cccc_boff(translator *tr, int link_idx, int lost, int total);
 void translator_cccc_voice(translator *tr, int link_idx, uint16_t seq, uint32_t timestamp,
                            int marker, const uint8_t ambe21[21]);
 
+/* SIGHUP reload (§6.3): forget any call state on a link that is being
+ * rebuilt or removed (its slot may come back as a different link). */
+void translator_link_reset(translator *tr, int link_idx);
+
 /* ---- OpenBridge side callback (called by obp_link.c), by index into Config.openbridge[] ---- */
 void translator_obp_dmrd_received(translator *tr, int peer_idx, const uint8_t body53[53]);
 

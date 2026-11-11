@@ -18,8 +18,13 @@ int  cccc_mux_start(cccc_mux *mx);   /* binds shared sockets, dials enabled outb
 void cccc_mux_stop(cccc_mux *mx);
 void cccc_mux_free(cccc_mux *mx);
 
-/* Call after config_reload_toggles() mutates *cfg in place (SIGHUP, §6.3):
- * starts newly-enabled outbound links, tears down newly-disabled links. */
+/* SIGHUP reload (§6.3), in two steps around the swap to the new config:
+ * cccc_mux_retire_link() stops one link (connection, reconnect timer) while
+ * *cfg still holds its old values (a link being rebuilt or removed); after
+ * the swap, cccc_mux_reconcile() starts every enabled link that is not
+ * running and tears down newly-disabled ones.  The shared sockets and every
+ * other link's connection are never touched. */
+void cccc_mux_retire_link(cccc_mux *mx, int link_idx);
 void cccc_mux_reconcile(cccc_mux *mx);
 
 int cccc_link_is_up(const cccc_mux *mx, int link_idx);

@@ -1,6 +1,6 @@
 /* main.c — cc2obp entry point: args, config load, wires cccc_mux <-> obp_mux
  * <-> translator together, runs the event loop.  SIGHUP reload (§6.3) is
- * deferred out of the signal handler (config_reload_toggles/logging are not
+ * deferred out of the signal handler (config parsing/logging are not
  * async-signal-safe) via a flag checked on the periodic tick. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +19,7 @@
 static ev_loop  *g_loop = NULL;
 static cccc_mux *g_cc   = NULL;
 static obp_mux  *g_ob   = NULL;
+static translator *g_tr = NULL;
 static const char *g_cfg_path = NULL;
 static Config    g_cfg;
 
@@ -28,17 +29,59 @@ static volatile sig_atomic_t g_shutdown_requested = 0;
 static void on_sighup(int signum)  { (void)signum; g_reload_requested = 1; }
 static void on_sigterm(int signum) { (void)signum; g_shutdown_requested = 1; }
 
+/* Only what changed is touched: a changed or removed link loses its own
+ * connection, a changed or removed peer its own socket.  Every other link
+ * stays up through the reload. */
 static void do_reload(void)
 {
+    static Config next;          /* ~60 KB: keep it off the stack */
+    static ReloadPlan plan;
     char err[8192];
-    LOGI("cc2obp", "SIGHUP received — reloading enabled/cross_connect_active toggles from %s (§6.3)", g_cfg_path);
-    if (config_reload_toggles(g_cfg_path, &g_cfg, err, sizeof err) != 0) {
+
+    LOGI("cc2obp", "SIGHUP received — reloading %s (§6.3)", g_cfg_path);
+    if (config_reload_plan(g_cfg_path, &g_cfg, &next, &plan, err, sizeof err) != 0) {
         LOGE("cc2obp", "reload failed, keeping running config: %s", err);
         return;
     }
+    if (plan.global_changed)
+        LOGW("cc2obp", "reload: [global] changed — ignored, applies on the next restart");
+
+    /* 1. Bring down what goes away or changes, while g_cfg still describes it.
+     *    Links first: a link going down may still send a VOICE_TERM to its peer. */
+    for (int i = 0; i < g_cfg.n_link; i++) {
+        if (plan.link[i] != RELOAD_CHANGE && plan.link[i] != RELOAD_REMOVE && plan.link[i] != RELOAD_REPLACE)
+            continue;
+        LOGI("cc2obp", "reload: link '%s' %s", g_cfg.link[i].name,
+             plan.link[i] == RELOAD_CHANGE ? "changed" : "removed");
+        cccc_mux_retire_link(g_cc, i);
+        translator_link_reset(g_tr, i);
+    }
+    for (int i = 0; i < g_cfg.n_openbridge; i++) {
+        if (plan.openbridge[i] != RELOAD_CHANGE && plan.openbridge[i] != RELOAD_REMOVE &&
+            plan.openbridge[i] != RELOAD_REPLACE)
+            continue;
+        LOGI("cc2obp", "reload: openbridge '%s' %s", g_cfg.openbridge[i].name,
+             plan.openbridge[i] == RELOAD_CHANGE ? "changed" : "removed");
+        obp_mux_retire_peer(g_ob, i);
+    }
+
+    /* 2. Switch to the new config (the muxes and translator hold &g_cfg). */
+    g_cfg = next;
+
+    /* 3. Bring up whatever is enabled and not running: added and rebuilt
+     *    entries, and toggles in either direction. */
+    for (int i = 0; i < g_cfg.n_link; i++)
+        if (plan.link[i] == RELOAD_ADD || plan.link[i] == RELOAD_REPLACE || plan.link[i] == RELOAD_TOGGLE)
+            LOGI("cc2obp", "reload: link '%s' %s", g_cfg.link[i].name,
+                 plan.link[i] == RELOAD_TOGGLE ? "toggled" : "added");
+    for (int i = 0; i < g_cfg.n_openbridge; i++)
+        if (plan.openbridge[i] == RELOAD_ADD || plan.openbridge[i] == RELOAD_REPLACE ||
+            plan.openbridge[i] == RELOAD_TOGGLE)
+            LOGI("cc2obp", "reload: openbridge '%s' %s", g_cfg.openbridge[i].name,
+                 plan.openbridge[i] == RELOAD_TOGGLE ? "toggled" : "added");
     config_warn_soft_issues(&g_cfg);
-    cccc_mux_reconcile(g_cc);
     obp_mux_reconcile(g_ob);
+    cccc_mux_reconcile(g_cc);
     LOGI("cc2obp", "reload complete");
 }
 
@@ -133,7 +176,7 @@ int main(int argc, char **argv)
          g_cfg.n_openbridge, g_cfg.n_link, cfg_path);
 
     g_loop = ev_new();
-    translator *tr = translator_new(&g_cfg, g_loop);
+    translator *tr = g_tr = translator_new(&g_cfg, g_loop);
     g_ob = obp_mux_new(&g_cfg, tr, g_loop);
     g_cc = cccc_mux_new(&g_cfg, tr, g_loop);
     translator_set_protocols(tr, g_cc, g_ob);

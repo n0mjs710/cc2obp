@@ -156,12 +156,22 @@ int obp_mux_start(obp_mux *mx)
     return 0;
 }
 
+void obp_mux_retire_peer(obp_mux *mx, int peer_idx)
+{
+    if (mx->active[peer_idx]) unbind_peer(mx, peer_idx);
+}
+
 void obp_mux_reconcile(obp_mux *mx)
 {
+    /* Close before binding: a peer enabled by this reload may take the
+     * bind_port of one disabled by it. */
     for (int i = 0; i < mx->cfg->n_openbridge; i++) {
-        int enabled = mx->cfg->openbridge[i].enabled;
-        if (enabled && !mx->active[i]) bind_peer(mx, i);
-        else if (!enabled && mx->active[i]) unbind_peer(mx, i);
+        const ObpPeerConfig *o = &mx->cfg->openbridge[i];
+        if ((!o->enabled || o->vacant) && mx->active[i]) unbind_peer(mx, i);
+    }
+    for (int i = 0; i < mx->cfg->n_openbridge; i++) {
+        const ObpPeerConfig *o = &mx->cfg->openbridge[i];
+        if (o->enabled && !o->vacant && !mx->active[i]) bind_peer(mx, i);
     }
 }
 

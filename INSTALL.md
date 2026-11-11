@@ -102,19 +102,21 @@ sudo systemctl enable --now cc2obp
 journalctl -u cc2obp -f
 ```
 
-## Reloading config toggles without a restart
+## Reloading config without a restart
 
-`[[link]].enabled`, `[[link]].cross_connect_active`, and
-`[[openbridge]].enabled` can be flipped in the config file and picked up
-without dropping every other link:
+Edit the config file, then:
 
 ```
 sudo systemctl reload cc2obp
 ```
 
-(equivalent to `sudo kill -HUP` the running process). Any other field-level
-change in the file is logged at WARNING and ignored — those require a
-restart. See `CONFIGURING.md` for what each toggle actually does.
+(equivalent to `sudo kill -HUP` the running process). Only what changed is
+touched: a changed or removed `[[link]]` loses its own connection, a changed
+or removed `[[openbridge]]` its own socket, a new one is brought up, and every
+other link stays up through the reload. A `[global]` change is logged at
+WARNING and ignored until a restart. A file that does not parse or validate
+is refused and the running config stays in effect. See `CONFIGURING.md` for
+details.
 
 ## Updating
 

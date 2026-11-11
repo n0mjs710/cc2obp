@@ -97,7 +97,9 @@ $(BIN): $(OBJECTS)
 #  - test_obp_scenarios: §15 orphaned call + seq/ts-gap consistency, driven
 #    from the OpenBridge (UDP) side using a fake peer (dmr/+crypto primitives
 #    to build valid DMRD frames) — see each file's header comment for scope.
-test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c tests/test_obp_scenarios.c
+#  - test_reload:       §6.3 SIGHUP reload touches only the links/peers that
+#    changed — the untouched link's connection stays up and keeps bridging.
+test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c tests/test_obp_scenarios.c tests/test_reload.c
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/cc2obp_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_cccc_ambe tests/test_cccc_ambe.c $(CCCC_DIR)/cccc_ambe.c $(DMR_SOURCES)
@@ -106,6 +108,8 @@ test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c test
 	/tmp/cc2obp_test_translate
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_obp_scenarios tests/test_obp_scenarios.c crypto.c $(DMR_SOURCES)
 	/tmp/cc2obp_test_obp_scenarios
+	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_reload tests/test_reload.c crypto.c $(DMR_SOURCES)
+	/tmp/cc2obp_test_reload
 
 clean:
 	rm -f $(OBJECTS) $(BIN)

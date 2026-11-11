@@ -16,8 +16,12 @@ int  obp_mux_start(obp_mux *mx);   /* binds a UDP socket per enabled peer (§5) 
 void obp_mux_stop(obp_mux *mx);
 void obp_mux_free(obp_mux *mx);
 
-/* Call after config_reload_toggles() mutates *cfg in place (SIGHUP, §6.3):
- * binds newly-enabled peers, closes newly-disabled peers' sockets. */
+/* SIGHUP reload (§6.3), in two steps around the swap to the new config:
+ * obp_mux_retire_peer() closes one peer's socket while *cfg still holds its
+ * old values (a peer being rebuilt or removed); after the swap,
+ * obp_mux_reconcile() binds every enabled peer that has no socket and closes
+ * newly-disabled ones.  Other peers' sockets are never touched. */
+void obp_mux_retire_peer(obp_mux *mx, int peer_idx);
 void obp_mux_reconcile(obp_mux *mx);
 
 int obp_peer_is_enabled(const obp_mux *mx, int peer_idx);

@@ -170,12 +170,26 @@ destination — that's full N-way conference bridging, a different problem
 compose it by pointing an HBlink3/HBlink4 `bridge.py`-style confbridge at
 one of `cc2obp`'s OpenBridge legs.
 
-## Reloading toggles
+## Reloading
 
-`enabled` and `cross_connect_active` (on both `[[link]]` and
-`[[openbridge]]`) can be changed and picked up with `systemctl reload
-cc2obp` (or `kill -HUP`) — see `INSTALL.md`. Any other field change in the
-file is logged at WARNING and ignored until a full restart.
+`systemctl reload cc2obp` (or `kill -HUP`) re-reads the file and applies the
+difference, entry by entry, matched by `name` — see `INSTALL.md`:
+
+- **unchanged** `[[link]]` / `[[openbridge]]` entries are not touched; their
+  connections and calls carry on through the reload;
+- **`enabled` / `cross_connect_active` changes** take effect on that entry
+  alone, as before;
+- **any other field change** on a `[[link]]` closes that link's connection
+  and brings it back with the new values (an outbound link redials; for an
+  inbound link the remote's own reconnect picks it up); on an
+  `[[openbridge]]`, that peer's socket is closed and re-bound;
+- **removed** entries are torn down, **new** ones are brought up;
+- **`[global]`** (identity, timers, `log_level`) is ignored until a full
+  restart; a WARNING says so.
+
+Renaming an entry is a remove plus an add. A file that fails to parse or
+validate is refused as a whole (logged at ERROR) and the running config
+stays in effect — run `--check` first.
 
 ## Testing your config
 
