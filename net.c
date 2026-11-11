@@ -46,8 +46,8 @@ int udp_bind(const char *ip, int port)
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     if (!ip || !*ip) ip = "0.0.0.0";
-    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { close(fd); return -1; }
-    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { close(fd); errno = EINVAL; return -1; }
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { int e = errno; close(fd); errno = e; return -1; }
     return fd;
 }
 

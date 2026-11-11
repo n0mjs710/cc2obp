@@ -90,9 +90,12 @@ static int obp_gate_open(translator *tr, int link_idx, const char *dir_label)
     if (lcfg->cross_connect_active && peer_ok) return 1;
 
     if (!lr->cx_drop_logged) {
-        if (!peer_ok)
-            LOGW(LOGN, "link '%s': cross-connect inactive, openbridge system '%s' is disabled — dropping %s",
-                 lcfg->name, lcfg->openbridge_system, dir_label);
+        if (!peer_ok) {
+            char why[192];
+            LOGW(LOGN, "link '%s': cross-connect inactive, openbridge system '%s' is %s — dropping %s",
+                 lcfg->name, lcfg->openbridge_system,
+                 obp_peer_down_reason(tr->ob, lcfg->openbridge_idx, why, sizeof why), dir_label);
+        }
         else
             LOGW(LOGN, "link '%s': cross-connect inactive — dropping %s", lcfg->name, dir_label);
         lr->cx_drop_logged = 1;

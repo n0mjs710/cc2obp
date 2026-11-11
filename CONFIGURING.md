@@ -191,6 +191,16 @@ Renaming an entry is a remove plus an add. A file that fails to parse or
 validate is refused as a whole (logged at ERROR) and the running config
 stays in effect — run `--check` first.
 
+If an `[[openbridge]]` peer's `bind_port` can't be bound (at startup or on a
+reload, typically because another program already holds the port), that
+peer stays down and everything else carries on. Its links stay up, but they
+pass no traffic. This is logged at ERROR, with the port, the reason and the
+links cut off. A reload that leaves a peer unbound ends with
+`reload finished with errors` instead of `reload complete`. cc2obp retries
+the bind every 10 seconds, logs `STILL DOWN` at ERROR every 5 minutes while
+it keeps failing, and logs `RECOVERED` at WARNING once it binds. Calls
+dropped in the meantime are logged with the same reason.
+
 ## Testing your config
 
 Before reloading or restarting a running instance, validate the file on its

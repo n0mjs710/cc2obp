@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <netinet/in.h>
 
-/* Bind a UDP socket to ip:port (ip may be "0.0.0.0").  Returns fd or -1. */
+/* Bind a UDP socket to ip:port (ip may be "0.0.0.0").  Returns fd, or -1 with errno set. */
 int udp_bind(const char *ip, int port);
 
 /* Create an unbound UDP socket suitable for sendto/recvfrom to a remote. -1 on err. */

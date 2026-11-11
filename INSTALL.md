@@ -115,8 +115,10 @@ touched: a changed or removed `[[link]]` loses its own connection, a changed
 or removed `[[openbridge]]` its own socket, a new one is brought up, and every
 other link stays up through the reload. A `[global]` change is logged at
 WARNING and ignored until a restart. A file that does not parse or validate
-is refused and the running config stays in effect. See `CONFIGURING.md` for
-details.
+is refused and the running config stays in effect. If a peer's `bind_port`
+can't be bound, the reload ends with `reload finished with errors` at ERROR.
+The peer stays down, its links pass no traffic, and cc2obp retries the bind
+every 10 seconds. See `CONFIGURING.md` for details.
 
 ## Updating
 

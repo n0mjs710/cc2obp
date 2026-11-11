@@ -82,13 +82,20 @@ static void do_reload(void)
     config_warn_soft_issues(&g_cfg);
     obp_mux_reconcile(g_ob);
     cccc_mux_reconcile(g_cc);
-    LOGI("cc2obp", "reload complete");
+
+    char failed[2048];
+    int n_failed = obp_mux_failed_peers(g_ob, failed, sizeof failed);
+    if (n_failed)
+        LOGE("cc2obp", "reload finished with errors: %d openbridge peer(s) not bound: %s", n_failed, failed);
+    else
+        LOGI("cc2obp", "reload complete");
 }
 
 static void tick_cb(ev_loop *loop, void *ud)
 {
     translator *tr = ud;
     translator_tick(tr);
+    obp_mux_tick(g_ob);
     if (g_reload_requested) { g_reload_requested = 0; do_reload(); }
     if (g_shutdown_requested) { ev_stop(loop); return; }
     ev_timer_after(loop, TICK_INTERVAL_S, tick_cb, tr);

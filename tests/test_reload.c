@@ -14,7 +14,11 @@
  *   3. enabled = false on one link: only that link drops; a link added
  *      when no slot is free is appended and comes up;
  *   4. a [global] change, then an unparseable file, then an entry with an
- *      empty name: nothing drops, the running config keeps working. */
+ *      empty name: nothing drops, the running config keeps working;
+ *   5. the OpenBridge peer's bind_port moves to a port already in use: the
+ *      bind failure, the reload result and the dropped call are logged at
+ *      ERROR/WARNING with the reason, no link drops, and the peer comes back
+ *      on its own once the port is free. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +31,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <time.h>
 
 #include "../dmr/dmr.h"
@@ -36,9 +41,11 @@
 #define FAKE_PEER_PORT  63101   /* this test's own OpenBridge socket (== peer_port in config) */
 #define BIND_PORT_1     63102   /* cc2obp's OpenBridge socket before step 2 */
 #define BIND_PORT_2     63103   /* ... and after */
+#define BIND_PORT_3     63104   /* step 5: held by this test, so cc2obp's bind fails */
 #define VOICE_TEST_PORT 43101   /* this test's CC-CC voice receiver (== cc_remote_voice_port) */
 #define PASSPHRASE      "test-passphrase"
 #define CFG_PATH        "/tmp/cc2obp_test_reload.toml"
+#define LOG_PATH        "/tmp/cc2obp_test_reload.log"
 
 #define LID_KEEP        61      /* link "keep",   tgid 1: never changes */
 #define LID_CHANGE_OLD  62      /* link "change", tgid 2: its LID moves 62 -> 65 in step 1 */
@@ -260,6 +267,28 @@ static int call_bridges(int peer_fd, int to_port, uint32_t tgid, tcp_reader *lin
     return bon && boff;
 }
 
+/* CC-origin call attempt on an inbound link: a B-on line on its control connection. */
+static void send_bon(tcp_reader *r, int lid, int tgid)
+{
+    char l[256];
+    int n = snprintf(l, sizeof l, "B01%02d000 3100001 31000 0.0 radioid=3100001 peerid=31000 Bee=B0199%03dG\n",
+                     lid, tgid);
+    ssize_t wr = write(r->fd, l, (size_t)n);
+    (void)wr;
+}
+
+/* 1 if cc2obp's log contains needle. */
+static int log_has(const char *needle)
+{
+    FILE *f = fopen(LOG_PATH, "r");
+    if (!f) return 0;
+    char line[2048];
+    int found = 0;
+    while (!found && fgets(line, sizeof line, f)) found = strstr(line, needle) != NULL;
+    fclose(f);
+    return found;
+}
+
 /* ---------------- test ---------------- */
 
 static pid_t g_pid;
@@ -280,6 +309,8 @@ int main(void)
     g_pid = fork();
     if (g_pid < 0) { perror("fork"); return 2; }
     if (g_pid == 0) {
+        int lf = open(LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (lf >= 0) { dup2(lf, 1); dup2(lf, 2); close(lf); }
         execl("./cc2obp", "cc2obp", "-c", CFG_PATH, "--log-level", "DEBUG", (char *)NULL);
         perror("execl"); _exit(127);
     }
@@ -344,6 +375,32 @@ int main(void)
     check("step 4: the refused entry never came up", cc_connect(&old_id, 0x11110009, 69) == 0);
     check("step 4: running config still bridges", call_bridges(peer_fd, BIND_PORT_2, 1, &keep));
 
+    /* ---- step 5: bind_port moves to a port that is already taken ---- */
+    int held = socket(AF_INET, SOCK_DGRAM, 0);   /* no SO_REUSEADDR: cc2obp's bind must fail */
+    {
+        struct sockaddr_in a; memset(&a, 0, sizeof a);
+        a.sin_family = AF_INET; a.sin_port = htons(BIND_PORT_3);
+        check("step 5: test holds the new bind_port", bind(held, (struct sockaddr *)&a, sizeof a) == 0);
+    }
+    c.bind_port = BIND_PORT_3;
+    reload(&c);
+    check("step 5: bind failure logged at ERROR with port, reason and links",
+          log_has("ERROR [obp.link] openbridge peer 'fakepeer' DOWN: cannot bind udp/63104 (Address already in use)") &&
+          log_has("links cut off: 'keep', 'change'"));
+    check("step 5: reload reports the failure instead of 'reload complete'",
+          log_has("reload finished with errors: 1 openbridge peer(s) not bound: 'fakepeer' (udp/63104"));
+    check("step 5: no link dropped", !wait_closed(&keep, 500) && !wait_closed(&change, 250));
+    send_bon(&keep, LID_KEEP, 1);
+    sleep_ms(300);
+    check("step 5: dropped call names the bind failure, not 'disabled'",
+          log_has("openbridge system 'fakepeer' is down (cannot bind udp/63104: Address already in use)"));
+    close(held);
+    int recovered = 0;
+    for (int i = 0; i < 30 && !recovered; i++) { sleep_ms(500); recovered = log_has("openbridge peer 'fakepeer' RECOVERED"); }
+    check("step 5: peer re-binds on its own once the port is free, logged at WARNING",
+          recovered && log_has("WARNING [obp.link] openbridge peer 'fakepeer' RECOVERED: bound udp/63104"));
+    check("step 5: recovered peer bridges", call_bridges(peer_fd, BIND_PORT_3, 1, &keep));
+
     if (keep.fd >= 0) close(keep.fd);
     if (change.fd >= 0) close(change.fd);
     if (extra.fd >= 0) close(extra.fd);
@@ -353,6 +410,8 @@ int main(void)
     kill(g_pid, SIGTERM);
     int status; waitpid(g_pid, &status, 0);
     unlink(CFG_PATH);
+    if (fails) fprintf(stderr, "cc2obp log: %s\n", LOG_PATH);
+    else unlink(LOG_PATH);
 
     printf("reload self-test: %d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

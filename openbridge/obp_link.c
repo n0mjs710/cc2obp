@@ -7,12 +7,17 @@
 #include "../net.h"
 #include "../crypto.h"
 #include "../log.h"
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
 
 #define LOGN "obp.link"
+
+#define BIND_RETRY_S     10.0    /* retry interval for a peer whose bind failed */
+#define BIND_REMINDER_S  300.0   /* re-log a peer that is still failing to bind */
 
 struct obp_mux {
     Config     *cfg;
@@ -21,6 +26,13 @@ struct obp_mux {
     int         fd[CFG_MAX_OPENBRIDGE];
     int         active[CFG_MAX_OPENBRIDGE];  /* mirrors cfg->openbridge[i].enabled at last (re)bind */
     struct { obp_mux *mx; int idx; } cbctx[CFG_MAX_OPENBRIDGE];
+
+    /* bind failure state, per peer: bind_errno == 0 means not failing */
+    int         bind_errno[CFG_MAX_OPENBRIDGE];
+    int         bind_attempts[CFG_MAX_OPENBRIDGE];
+    double      down_since[CFG_MAX_OPENBRIDGE];
+    double      next_retry[CFG_MAX_OPENBRIDGE];
+    double      next_reminder[CFG_MAX_OPENBRIDGE];
 };
 
 /* Constant-time-ish digest compare (defense in depth; not a hard requirement
@@ -77,21 +89,69 @@ static void on_obp_readable(ev_loop *loop, int fd, void *ud)
     translator_obp_dmrd_received(mx->tr, idx, buf);
 }
 
-static int bind_peer(obp_mux *mx, int idx)
+/* Names of the enabled [[link]] entries routed through peer idx, for log lines. */
+static void affected_links(const obp_mux *mx, int idx, char *out, size_t cap)
+{
+    size_t at = 0;
+    out[0] = 0;
+    for (int i = 0; i < mx->cfg->n_link && at < cap; i++) {
+        const LinkConfig *l = &mx->cfg->link[i];
+        if (l->vacant || !l->enabled || l->openbridge_idx != idx) continue;
+        int n = snprintf(out + at, cap - at, "%s'%s'", at ? ", " : "", l->name);
+        if (n < 0) break;
+        at += (size_t)n;
+    }
+    if (!out[0]) snprintf(out, cap, "(none)");
+}
+
+static void clear_bind_failure(obp_mux *mx, int idx)
+{
+    mx->bind_errno[idx] = 0;
+    mx->bind_attempts[idx] = 0;
+}
+
+static void note_bind_failure(obp_mux *mx, int idx, int err)
+{
+    const ObpPeerConfig *o = &mx->cfg->openbridge[idx];
+    double now = ev_now(mx->loop);
+    char links[1024];
+
+    if (!mx->bind_errno[idx]) {
+        mx->down_since[idx] = now;
+        mx->bind_attempts[idx] = 0;
+    }
+    mx->bind_attempts[idx]++;
+    mx->bind_errno[idx] = err;
+    mx->next_retry[idx] = now + BIND_RETRY_S;
+    mx->next_reminder[idx] = now + BIND_REMINDER_S;
+
+    affected_links(mx, idx, links, sizeof links);
+    LOGE(LOGN, "openbridge peer '%s' DOWN: cannot bind udp/%d (%s) — no traffic to or from it; "
+               "links cut off: %s; retrying every %.0fs",
+         o->name, o->bind_port, strerror(err), links, BIND_RETRY_S);
+}
+
+/* Returns 0 on success, else the errno of the failed bind. */
+static int try_bind(obp_mux *mx, int idx)
 {
     ObpPeerConfig *o = &mx->cfg->openbridge[idx];
-    mx->fd[idx] = udp_bind("0.0.0.0", o->bind_port);
-    if (mx->fd[idx] < 0) {
-        LOGE(LOGN, "failed to bind udp/%d for openbridge peer '%s'", o->bind_port, o->name);
-        return -1;
-    }
+    int fd = udp_bind("0.0.0.0", o->bind_port);
+    if (fd < 0) return errno ? errno : EIO;
+    mx->fd[idx] = fd;
     mx->cbctx[idx].mx = mx;
     mx->cbctx[idx].idx = idx;
-    ev_add_fd(mx->loop, mx->fd[idx], on_obp_readable, &mx->cbctx[idx]);
+    ev_add_fd(mx->loop, fd, on_obp_readable, &mx->cbctx[idx]);
     mx->active[idx] = 1;
     LOGI(LOGN, "openbridge peer '%s' socket up: local udp/%d -> remote %s:%d (network_id=%u)",
          o->name, o->bind_port, o->peer_ip, o->peer_port, o->network_id);
     return 0;
+}
+
+static void bind_peer(obp_mux *mx, int idx)
+{
+    int err = try_bind(mx, idx);
+    if (err) note_bind_failure(mx, idx, err);
+    else     clear_bind_failure(mx, idx);
 }
 
 static void unbind_peer(obp_mux *mx, int idx)
@@ -102,6 +162,7 @@ static void unbind_peer(obp_mux *mx, int idx)
         mx->fd[idx] = -1;
     }
     mx->active[idx] = 0;
+    clear_bind_failure(mx, idx);
     LOGI(LOGN, "openbridge peer '%s' socket down", mx->cfg->openbridge[idx].name);
 }
 
@@ -159,6 +220,7 @@ int obp_mux_start(obp_mux *mx)
 void obp_mux_retire_peer(obp_mux *mx, int peer_idx)
 {
     if (mx->active[peer_idx]) unbind_peer(mx, peer_idx);
+    clear_bind_failure(mx, peer_idx);
 }
 
 void obp_mux_reconcile(obp_mux *mx)
@@ -167,12 +229,76 @@ void obp_mux_reconcile(obp_mux *mx)
      * bind_port of one disabled by it. */
     for (int i = 0; i < mx->cfg->n_openbridge; i++) {
         const ObpPeerConfig *o = &mx->cfg->openbridge[i];
-        if ((!o->enabled || o->vacant) && mx->active[i]) unbind_peer(mx, i);
+        if (!o->enabled || o->vacant) {
+            if (mx->active[i]) unbind_peer(mx, i);
+            clear_bind_failure(mx, i);
+        }
     }
     for (int i = 0; i < mx->cfg->n_openbridge; i++) {
         const ObpPeerConfig *o = &mx->cfg->openbridge[i];
         if (o->enabled && !o->vacant && !mx->active[i]) bind_peer(mx, i);
     }
+}
+
+void obp_mux_tick(obp_mux *mx)
+{
+    double now = ev_now(mx->loop);
+    for (int i = 0; i < mx->cfg->n_openbridge; i++) {
+        const ObpPeerConfig *o = &mx->cfg->openbridge[i];
+        if (!mx->bind_errno[i] || mx->active[i] || !o->enabled || o->vacant) continue;
+        if (now < mx->next_retry[i]) continue;
+
+        mx->bind_attempts[i]++;
+        int err = try_bind(mx, i);
+        if (!err) {
+            LOGW(LOGN, "openbridge peer '%s' RECOVERED: bound udp/%d after %d attempts, down %.0fs",
+                 o->name, o->bind_port, mx->bind_attempts[i], now - mx->down_since[i]);
+            clear_bind_failure(mx, i);
+            continue;
+        }
+        mx->next_retry[i] = now + BIND_RETRY_S;
+        if (err != mx->bind_errno[i] || now >= mx->next_reminder[i]) {
+            char links[1024];
+            affected_links(mx, i, links, sizeof links);
+            mx->bind_errno[i] = err;
+            mx->next_reminder[i] = now + BIND_REMINDER_S;
+            LOGE(LOGN, "openbridge peer '%s' STILL DOWN for %.0fs: cannot bind udp/%d (%s), %d attempts — "
+                       "links cut off: %s; still retrying every %.0fs",
+                 o->name, now - mx->down_since[i], o->bind_port, strerror(err),
+                 mx->bind_attempts[i], links, BIND_RETRY_S);
+        }
+    }
+}
+
+const char *obp_peer_down_reason(const obp_mux *mx, int peer_idx, char *buf, size_t cap)
+{
+    if (peer_idx < 0 || peer_idx >= mx->cfg->n_openbridge) { snprintf(buf, cap, "not configured"); return buf; }
+    const ObpPeerConfig *o = &mx->cfg->openbridge[peer_idx];
+    if (mx->active[peer_idx]) { snprintf(buf, cap, "up"); return buf; }
+    if (!o->enabled) { snprintf(buf, cap, "disabled"); return buf; }
+    if (mx->bind_errno[peer_idx])
+        snprintf(buf, cap, "down (cannot bind udp/%d: %s)", o->bind_port, strerror(mx->bind_errno[peer_idx]));
+    else
+        snprintf(buf, cap, "down");
+    return buf;
+}
+
+int obp_mux_failed_peers(const obp_mux *mx, char *buf, size_t cap)
+{
+    int count = 0;
+    size_t at = 0;
+    buf[0] = 0;
+    for (int i = 0; i < mx->cfg->n_openbridge; i++) {
+        const ObpPeerConfig *o = &mx->cfg->openbridge[i];
+        if (!mx->bind_errno[i] || mx->active[i] || !o->enabled || o->vacant) continue;
+        count++;
+        if (at < cap) {
+            int n = snprintf(buf + at, cap - at, "%s'%s' (udp/%d: %s)", at ? ", " : "",
+                             o->name, o->bind_port, strerror(mx->bind_errno[i]));
+            if (n > 0) at += (size_t)n;
+        }
+    }
+    return count;
 }
 
 void obp_mux_stop(obp_mux *mx)

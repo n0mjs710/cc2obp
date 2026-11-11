@@ -24,7 +24,22 @@ void obp_mux_free(obp_mux *mx);
 void obp_mux_retire_peer(obp_mux *mx, int peer_idx);
 void obp_mux_reconcile(obp_mux *mx);
 
+/* A peer whose bind fails (at startup or on reload) stays down while every
+ * other peer and every link carries on: the failure is logged at ERROR with
+ * the links it cuts off, the bind is retried every 10 s from obp_mux_tick(),
+ * a still-failing peer is re-logged at ERROR every 5 minutes, and recovery is
+ * logged at WARNING.  Call obp_mux_tick() once a second. */
+void obp_mux_tick(obp_mux *mx);
+
 int obp_peer_is_enabled(const obp_mux *mx, int peer_idx);
+
+/* Why peer_idx is not usable: "disabled", "down (cannot bind udp/N: <reason>)",
+ * or "up".  Writes into buf and returns it. */
+const char *obp_peer_down_reason(const obp_mux *mx, int peer_idx, char *buf, size_t cap);
+
+/* Enabled peers whose bind is failing: returns the count and lists them in buf
+ * as "'name' (udp/N: <reason>)", comma-separated. */
+int obp_mux_failed_peers(const obp_mux *mx, char *buf, size_t cap);
 
 /* Send a DMRD frame to peer_idx.  body must be exactly OBP_DMRD_BODY_LEN (53)
  * bytes; bytes OBP_NETID_OFF..+4 are overwritten with that peer's own
