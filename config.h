@@ -30,6 +30,8 @@ typedef struct {
                                      * (bytes 11-14) with network_id on send — forward the
                                      * originating source-peer instead (unvalidated field;
                                      * see obp_send_dmrd / translate.c). Default off. */
+    int      vacant;               /* slot left behind by a reload that removed this peer:
+                                     * never bound, never matched; reused by a later add */
 } ObpPeerConfig;
 
 typedef struct {
@@ -45,6 +47,8 @@ typedef struct {
     int       cc_remote_port;       /* outbound only; -1 if not applicable/unset (§6.4) */
     int       cc_remote_voice_port;
     char      cc_channel_name[128]; /* outbound only (§6.2) */
+    int       vacant;               /* slot left behind by a reload that removed this link:
+                                     * never dialed, never matched; reused by a later add */
 } LinkConfig;
 
 typedef struct {
@@ -71,11 +75,33 @@ typedef struct {
  * returns -1 and fills err with a human-readable message. */
 int config_load(const char *path, Config *cfg, char *err, size_t errlen);
 
-/* Re-parse path and update only enabled/cross_connect_active on entries
- * matched by name against *cfg (SIGHUP reload, §6.3).  Any other field-level
- * difference is logged at WARNING and ignored.  Returns 0 on success (even if
- * some entries were unmatched/warned), -1 on a hard parse error. */
-int config_reload_toggles(const char *path, Config *cfg, char *err, size_t errlen);
+/* SIGHUP reload (§6.3).  What a reload does to one [[openbridge]] or [[link]]
+ * slot.  Slots are matched by name and never move, so every index held by
+ * cccc_link.c, obp_link.c and translate.c stays valid across a reload. */
+typedef enum {
+    RELOAD_KEEP = 0,   /* unchanged: left completely alone */
+    RELOAD_TOGGLE,     /* only enabled/cross_connect_active changed (applied by *_reconcile) */
+    RELOAD_CHANGE,     /* any other field changed: tear down, then bring up with the new values */
+    RELOAD_REMOVE,     /* no longer in the file: tear down, slot becomes vacant */
+    RELOAD_ADD,        /* new in the file: brought up in a vacant or new slot */
+    RELOAD_REPLACE     /* removed, and its slot reused by an add in the same reload:
+                        * the old entry comes down before the new one goes up */
+} reload_action_t;
+
+typedef struct {
+    reload_action_t openbridge[CFG_MAX_OPENBRIDGE];
+    reload_action_t link[CFG_MAX_LINKS];
+    int           global_changed;   /* [global] differs: ignored until a full restart */
+} ReloadPlan;
+
+/* Re-parse path and lay the result out against *cur: every entry keeps the
+ * slot it already has (matched by name), removed entries leave a vacant slot,
+ * new entries take a vacant slot or are appended.  Fills *next (the config to
+ * run after the reload; [global] is carried over from *cur unchanged) and
+ * *plan.  Does not touch *cur.  Returns 0 on success, -1 on a parse or
+ * validation error (err filled; the running config stays as it is). */
+int config_reload_plan(const char *path, const Config *cur, Config *next, ReloadPlan *plan,
+                       char *err, size_t errlen);
 
 /* Log (LOGW), but do not fail, likely-typo duplicate outbound
  * (cc_remote_ip, cc_remote_port, cc_lid) tuples (§6.4).  Call after log_init,

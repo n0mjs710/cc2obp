@@ -312,7 +312,8 @@ void translator_obp_dmrd_received(translator *tr, int peer_idx, const uint8_t bo
 
     int link_idx = -1;
     for (int i = 0; i < tr->cfg->n_link; i++) {
-        if (tr->cfg->link[i].openbridge_idx == peer_idx && (uint32_t)tr->cfg->link[i].tgid == dst_id) {
+        if (!tr->cfg->link[i].vacant && tr->cfg->link[i].openbridge_idx == peer_idx &&
+            (uint32_t)tr->cfg->link[i].tgid == dst_id) {
             link_idx = i;
             break;
         }
@@ -446,6 +447,11 @@ void translator_cccc_link_down(translator *tr, int link_idx)
     }
     lr->has_call = 0;
     lr->cx_drop_logged = 0;
+}
+
+void translator_link_reset(translator *tr, int link_idx)
+{
+    memset(&tr->link[link_idx], 0, sizeof tr->link[link_idx]);
 }
 
 /* ---------------- lifecycle / housekeeping ---------------- */

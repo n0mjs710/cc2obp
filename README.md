@@ -43,10 +43,11 @@ gaps on the far end, not synthesized filler.
 - **No external dependencies.** The TOML parser, HMAC-SHA1, the event loop,
   and the DMR DSP/FEC code are all in this repository and compiled into the
   binary — no Python, no `pip`, no third-party libraries.
-- **`enabled` / `cross_connect_active` runtime toggles, reloadable via
-  SIGHUP** without a full restart — for taking a link out of service, or for
-  transit-side maintenance that keeps the far Control Center from seeing
-  reconnect churn while you work behind the OpenBridge leg.
+- **Config reload via SIGHUP** without a full restart — only the links and
+  peers that changed are touched, the rest stay up. Includes the `enabled` /
+  `cross_connect_active` runtime toggles, for taking a link out of service,
+  or for transit-side maintenance that keeps the far Control Center from
+  seeing reconnect churn while you work behind the OpenBridge leg.
 
 **ARCHITECTURE:**
 

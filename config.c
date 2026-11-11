@@ -109,6 +109,7 @@ static void load_openbridge(const toml *t, errbag *e, Config *cfg)
         memset(o, 0, sizeof *o);
 
         get_str(t, e, sec, "name", 1, "", o->name, sizeof o->name);
+        if (!o->name[0]) adderr(e, "[%s] name: must not be empty (a reload matches entries by name)", sec);
         o->enabled = get_bool(t, e, sec, "enabled", 0, 1);
         get_str(t, e, sec, "peer_ip", 1, "", o->peer_ip, sizeof o->peer_ip);
         if (o->peer_ip[0] && !is_valid_ipv4(o->peer_ip))
@@ -153,7 +154,7 @@ static void load_openbridge(const toml *t, errbag *e, Config *cfg)
 static int find_openbridge(const Config *cfg, const char *name)
 {
     for (int i = 0; i < cfg->n_openbridge; i++)
-        if (!strcmp(cfg->openbridge[i].name, name)) return i;
+        if (!cfg->openbridge[i].vacant && !strcmp(cfg->openbridge[i].name, name)) return i;
     return -1;
 }
 
@@ -170,6 +171,7 @@ static void load_links(const toml *t, errbag *e, Config *cfg)
         memset(l, 0, sizeof *l);
 
         get_str(t, e, sec, "name", 1, "", l->name, sizeof l->name);
+        if (!l->name[0]) adderr(e, "[%s] name: must not be empty (a reload matches entries by name)", sec);
         l->enabled = get_bool(t, e, sec, "enabled", 0, 1);
         l->cross_connect_active = get_bool(t, e, sec, "cross_connect_active", 0, 1);
         l->tgid = (int)get_int(t, e, sec, "tgid", 1, 0, 1, 0, 0, 0);
@@ -248,9 +250,9 @@ static void load_links(const toml *t, errbag *e, Config *cfg)
 void config_warn_soft_issues(const Config *cfg)
 {
     for (int i = 0; i < cfg->n_link; i++) {
-        if (cfg->link[i].cc_role != CC_ROLE_OUTBOUND) continue;
+        if (cfg->link[i].vacant || cfg->link[i].cc_role != CC_ROLE_OUTBOUND) continue;
         for (int j = i + 1; j < cfg->n_link; j++) {
-            if (cfg->link[j].cc_role != CC_ROLE_OUTBOUND) continue;
+            if (cfg->link[j].vacant || cfg->link[j].cc_role != CC_ROLE_OUTBOUND) continue;
             if (!strcmp(cfg->link[i].cc_remote_ip, cfg->link[j].cc_remote_ip) &&
                 cfg->link[i].cc_remote_port == cfg->link[j].cc_remote_port &&
                 cfg->link[i].cc_lid == cfg->link[j].cc_lid)
@@ -298,63 +300,168 @@ int config_load(const char *path, Config *cfg, char *err, size_t errlen)
     return 0;
 }
 
-int config_reload_toggles(const char *path, Config *cfg, char *err, size_t errlen)
+/* ---------------- SIGHUP reload (§6.3) ---------------- */
+
+static int peer_identity_differs(const ObpPeerConfig *a, const ObpPeerConfig *b)
 {
-    Config fresh;
+    return strcmp(a->peer_ip, b->peer_ip) != 0 || a->peer_port != b->peer_port ||
+           a->bind_port != b->bind_port || a->network_id != b->network_id ||
+           a->passphrase_len != b->passphrase_len ||
+           memcmp(a->passphrase, b->passphrase, (size_t)a->passphrase_len) != 0 ||
+           a->preserve_source_peer != b->preserve_source_peer;
+}
+
+/* openbridge_system is compared by name: slots never move, so a link that
+ * still names the same peer still points at the same index. */
+static int link_identity_differs(const LinkConfig *a, const LinkConfig *b)
+{
+    return a->tgid != b->tgid || strcmp(a->openbridge_system, b->openbridge_system) != 0 ||
+           a->cc_role != b->cc_role || a->cc_lid != b->cc_lid ||
+           strcmp(a->cc_remote_ip, b->cc_remote_ip) != 0 ||
+           a->cc_remote_port != b->cc_remote_port || a->cc_remote_voice_port != b->cc_remote_voice_port ||
+           strcmp(a->cc_channel_name, b->cc_channel_name) != 0;
+}
+
+static int global_differs(const Config *a, const Config *b)
+{
+    return a->log_level != b->log_level ||
+           strcmp(a->cc_site_name, b->cc_site_name) != 0 || strcmp(a->cc_mac_address, b->cc_mac_address) != 0 ||
+           strcmp(a->cc_code_revision, b->cc_code_revision) != 0 || strcmp(a->cc_version, b->cc_version) != 0 ||
+           strcmp(a->cc_os_version, b->cc_os_version) != 0 ||
+           a->cc_keepalive_interval != b->cc_keepalive_interval || a->cc_link_timeout != b->cc_link_timeout;
+}
+
+/* Lay the fresh [[openbridge]] entries out over the running slots, matched
+ * by name: a kept peer stays in its slot, a removed one leaves a vacant slot,
+ * a new one takes the first vacant slot or is appended.  A slot freed by this
+ * same reload still has its old peer running, so reusing it is a REPLACE (old
+ * one down first), not an ADD. */
+static int lay_out_openbridge(const Config *cur, const Config *fr, Config *next, ReloadPlan *plan,
+                              char *err, size_t errlen)
+{
+    int used[CFG_MAX_OPENBRIDGE] = {0};
+    next->n_openbridge = cur->n_openbridge;
+
+    for (int i = 0; i < cur->n_openbridge; i++) {
+        const ObpPeerConfig *o = &cur->openbridge[i];
+        plan->openbridge[i] = RELOAD_KEEP;
+        if (o->vacant) { next->openbridge[i] = *o; continue; }
+        int j = 0;
+        while (j < fr->n_openbridge && (used[j] || strcmp(fr->openbridge[j].name, o->name) != 0)) j++;
+        if (j == fr->n_openbridge) {
+            memset(&next->openbridge[i], 0, sizeof next->openbridge[i]);
+            next->openbridge[i].vacant = 1;
+            plan->openbridge[i] = RELOAD_REMOVE;
+            continue;
+        }
+        used[j] = 1;
+        next->openbridge[i] = fr->openbridge[j];
+        if (peer_identity_differs(o, &fr->openbridge[j]))
+            plan->openbridge[i] = RELOAD_CHANGE;
+        else if (o->enabled != fr->openbridge[j].enabled)
+            plan->openbridge[i] = RELOAD_TOGGLE;
+    }
+
+    for (int j = 0; j < fr->n_openbridge; j++) {
+        if (used[j]) continue;
+        int i = 0;
+        while (i < next->n_openbridge && !next->openbridge[i].vacant) i++;
+        if (i == next->n_openbridge) {
+            if (next->n_openbridge >= CFG_MAX_OPENBRIDGE) {
+                snprintf(err, errlen, "reload: [[openbridge]] '%s': no free slot (max %d)",
+                         fr->openbridge[j].name, CFG_MAX_OPENBRIDGE);
+                return -1;
+            }
+            next->n_openbridge++;
+        }
+        plan->openbridge[i] = (i < cur->n_openbridge && plan->openbridge[i] == RELOAD_REMOVE)
+                              ? RELOAD_REPLACE : RELOAD_ADD;
+        next->openbridge[i] = fr->openbridge[j];
+    }
+    return 0;
+}
+
+/* Same layout rules as lay_out_openbridge(), for [[link]]. */
+static int lay_out_links(const Config *cur, const Config *fr, Config *next, ReloadPlan *plan,
+                         char *err, size_t errlen)
+{
+    int used[CFG_MAX_LINKS] = {0};
+    next->n_link = cur->n_link;
+
+    for (int i = 0; i < cur->n_link; i++) {
+        const LinkConfig *l = &cur->link[i];
+        plan->link[i] = RELOAD_KEEP;
+        if (l->vacant) { next->link[i] = *l; continue; }
+        int j = 0;
+        while (j < fr->n_link && (used[j] || strcmp(fr->link[j].name, l->name) != 0)) j++;
+        if (j == fr->n_link) {
+            memset(&next->link[i], 0, sizeof next->link[i]);
+            next->link[i].vacant = 1;
+            next->link[i].openbridge_idx = -1;
+            plan->link[i] = RELOAD_REMOVE;
+            continue;
+        }
+        used[j] = 1;
+        next->link[i] = fr->link[j];
+        if (link_identity_differs(l, &fr->link[j]))
+            plan->link[i] = RELOAD_CHANGE;
+        else if (l->enabled != fr->link[j].enabled || l->cross_connect_active != fr->link[j].cross_connect_active)
+            plan->link[i] = RELOAD_TOGGLE;
+    }
+
+    for (int j = 0; j < fr->n_link; j++) {
+        if (used[j]) continue;
+        int i = 0;
+        while (i < next->n_link && !next->link[i].vacant) i++;
+        if (i == next->n_link) {
+            if (next->n_link >= CFG_MAX_LINKS) {
+                snprintf(err, errlen, "reload: [[link]] '%s': no free slot (max %d)",
+                         fr->link[j].name, CFG_MAX_LINKS);
+                return -1;
+            }
+            next->n_link++;
+        }
+        plan->link[i] = (i < cur->n_link && plan->link[i] == RELOAD_REMOVE) ? RELOAD_REPLACE : RELOAD_ADD;
+        next->link[i] = fr->link[j];
+    }
+    return 0;
+}
+
+int config_reload_plan(const char *path, const Config *cur, Config *next, ReloadPlan *plan,
+                       char *err, size_t errlen)
+{
+    static Config fresh;   /* ~60 KB: keep it off the stack */
     if (config_load(path, &fresh, err, errlen) != 0)
         return -1;
 
-    for (int i = 0; i < cfg->n_openbridge; i++) {
-        int found = 0;
-        for (int j = 0; j < fresh.n_openbridge; j++) {
-            if (strcmp(cfg->openbridge[i].name, fresh.openbridge[j].name) != 0) continue;
-            found = 1;
-            if (cfg->openbridge[i].enabled != fresh.openbridge[j].enabled) {
-                LOGI("config", "reload: openbridge '%s' enabled %d -> %d",
-                     cfg->openbridge[i].name, cfg->openbridge[i].enabled, fresh.openbridge[j].enabled);
-                cfg->openbridge[i].enabled = fresh.openbridge[j].enabled;
-            }
-            /* Any other field difference is out of scope for a toggle-only
-             * reload (§6.3) — warn and ignore. */
-            if (cfg->openbridge[i].peer_port != fresh.openbridge[j].peer_port ||
-                strcmp(cfg->openbridge[i].peer_ip, fresh.openbridge[j].peer_ip) != 0 ||
-                cfg->openbridge[i].network_id != fresh.openbridge[j].network_id)
-                LOGW("config", "reload: [[openbridge]] '%s' has non-toggle field changes — ignored "
-                     "(full reconfiguration requires a restart, §1)", cfg->openbridge[i].name);
-            break;
-        }
-        if (!found)
-            LOGW("config", "reload: [[openbridge]] '%s' no longer present in file — ignored "
-                 "(removal requires a restart)", cfg->openbridge[i].name);
-    }
+    memset(plan, 0, sizeof *plan);
+    memset(next, 0, sizeof *next);
 
-    for (int i = 0; i < cfg->n_link; i++) {
-        int found = 0;
-        for (int j = 0; j < fresh.n_link; j++) {
-            if (strcmp(cfg->link[i].name, fresh.link[j].name) != 0) continue;
-            found = 1;
-            if (cfg->link[i].enabled != fresh.link[j].enabled) {
-                LOGI("config", "reload: link '%s' enabled %d -> %d",
-                     cfg->link[i].name, cfg->link[i].enabled, fresh.link[j].enabled);
-                cfg->link[i].enabled = fresh.link[j].enabled;
-            }
-            if (cfg->link[i].cross_connect_active != fresh.link[j].cross_connect_active) {
-                LOGI("config", "reload: link '%s' cross_connect_active %d -> %d",
-                     cfg->link[i].name, cfg->link[i].cross_connect_active, fresh.link[j].cross_connect_active);
-                cfg->link[i].cross_connect_active = fresh.link[j].cross_connect_active;
-            }
-            if (cfg->link[i].tgid != fresh.link[j].tgid ||
-                cfg->link[i].cc_lid != fresh.link[j].cc_lid ||
-                strcmp(cfg->link[i].cc_remote_ip, fresh.link[j].cc_remote_ip) != 0 ||
-                cfg->link[i].openbridge_idx != fresh.link[j].openbridge_idx)
-                LOGW("config", "reload: [[link]] '%s' has non-toggle field changes — ignored "
-                     "(full reconfiguration requires a restart, §1)", cfg->link[i].name);
-            break;
-        }
-        if (!found)
-            LOGW("config", "reload: [[link]] '%s' no longer present in file — ignored "
-                 "(removal requires a restart)", cfg->link[i].name);
-    }
+    /* [global] is out of scope for a reload (its identity fields already went
+     * out in every live link's handshake): keep the running values until a restart. */
+    plan->global_changed = global_differs(cur, &fresh);
+    next->log_level = cur->log_level;
+    memcpy(next->cc_site_name, cur->cc_site_name, sizeof next->cc_site_name);
+    memcpy(next->cc_mac_address, cur->cc_mac_address, sizeof next->cc_mac_address);
+    memcpy(next->cc_code_revision, cur->cc_code_revision, sizeof next->cc_code_revision);
+    memcpy(next->cc_version, cur->cc_version, sizeof next->cc_version);
+    memcpy(next->cc_os_version, cur->cc_os_version, sizeof next->cc_os_version);
+    next->cc_keepalive_interval = cur->cc_keepalive_interval;
+    next->cc_link_timeout = cur->cc_link_timeout;
 
+    if (lay_out_openbridge(cur, &fresh, next, plan, err, errlen) != 0 ||
+        lay_out_links(cur, &fresh, next, plan, err, errlen) != 0)
+        return -1;
+
+    /* Peers kept their slots by name; re-resolve each link against the new layout. */
+    for (int i = 0; i < next->n_link; i++) {
+        LinkConfig *l = &next->link[i];
+        if (l->vacant) { l->openbridge_idx = -1; continue; }
+        l->openbridge_idx = find_openbridge(next, l->openbridge_system);
+        /* Cannot happen with name-stable slots; never keep a link on a stale index. */
+        if (i < cur->n_link && (plan->link[i] == RELOAD_KEEP || plan->link[i] == RELOAD_TOGGLE) &&
+            l->openbridge_idx != cur->link[i].openbridge_idx)
+            plan->link[i] = RELOAD_CHANGE;
+    }
     return 0;
 }

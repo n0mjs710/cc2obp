@@ -507,7 +507,7 @@ static void handle_question_complete(cccc_mux *mx, pending_conn *p)
     int matched = -1;
     for (int i = 0; i < mx->cfg->n_link; i++) {
         const LinkConfig *lcfg = &mx->cfg->link[i];
-        if (lcfg->cc_role == CC_ROLE_INBOUND && lcfg->enabled &&
+        if (!lcfg->vacant && lcfg->cc_role == CC_ROLE_INBOUND && lcfg->enabled &&
             !strcmp(lcfg->cc_remote_ip, p->src_ip) && lcfg->cc_lid == lid) {
             matched = i;
             break;
@@ -715,11 +715,20 @@ int cccc_mux_start(cccc_mux *mx)
     return 0;
 }
 
+void cccc_mux_retire_link(cccc_mux *mx, int link_idx)
+{
+    cc_link *lk = &mx->links[link_idx];
+    lk->active = 0;   /* before teardown, so it does not schedule a reconnect */
+    if (lk->reconnect_timer) { ev_timer_cancel(mx->loop, lk->reconnect_timer); lk->reconnect_timer = NULL; }
+    if (lk->state != LST_DOWN) teardown_link_connection(mx, link_idx, "changed or removed via config reload");
+}
+
 void cccc_mux_reconcile(cccc_mux *mx)
 {
     for (int i = 0; i < mx->cfg->n_link; i++) {
         const LinkConfig *lcfg = &mx->cfg->link[i];
         cc_link *lk = &mx->links[i];
+        if (lcfg->vacant) continue;
         if (lcfg->cc_role == CC_ROLE_OUTBOUND) {
             if (lcfg->enabled && !lk->active) {
                 lk->active = 1;
