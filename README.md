@@ -63,9 +63,10 @@ gaps on the far end, not synthesized filler.
 - `translate.c` — wires the two sides together: the link table, per-call
   state, and both directional translation flows.
 - `tests/` — a DSP self-test against golden vectors, a CC-CC AMBE
-  bit-packing test, and two system tests that drive the compiled binary
+  bit-packing test, and four system tests that drive the compiled binary
   over real loopback sockets (SSRC collision; orphaned call and
-  sequence/timestamp gap consistency).
+  sequence/timestamp gap consistency; SIGHUP reload; per-call OpenBridge
+  sequence).
 
 **VERIFICATION:**
 
@@ -73,7 +74,7 @@ gaps on the far end, not synthesized filler.
 make test
 ```
 
-runs all four suites — 117 checks as of this writing, 0 failures.
+runs all six suites — 163 checks as of this writing, 0 failures.
 
 **WHAT IT IS NOT:**
 
