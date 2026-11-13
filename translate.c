@@ -52,6 +52,7 @@ typedef struct {
     int      cc_sent_first;    /* CC-CC RTP marker-bit tracking (obp-origin) */
     int      cc_seq;           /* most recent wall-clock slot index (§10.4, obp-origin) */
     int      obp_seq_pos;      /* outgoing OpenBridge burst-position counter 0..5 (cc-origin) */
+    int      obp_seq;          /* outgoing OpenBridge DMRD sequence, 0 at VOICE_HEAD, wraps at 256 (cc-origin) */
 } call_state;
 
 typedef struct {
@@ -66,7 +67,6 @@ struct translator {
     struct cccc_mux *cc;
     struct obp_mux   *ob;
     link_runtime link[CFG_MAX_LINKS];
-    int        obp_seq_ctr[CFG_MAX_OPENBRIDGE];  /* §16: continuous per OpenBridge peer, wraps at 256 */
 };
 
 /* ---------------- small helpers ---------------- */
@@ -145,7 +145,7 @@ static void extract_ambe(const uint8_t payload33[33], dmr_bit ambe49[3][49])
     dmr_ambe_72_to_49(a3_72, ambe49[2]);
 }
 
-/* ---------------- OpenBridge DMRD frame send (§10.2, §16) ---------------- */
+/* ---------------- OpenBridge DMRD frame send (§10.2) ---------------- */
 
 static void send_dmrd(translator *tr, int link_idx, uint8_t flags, const uint8_t payload33[33])
 {
@@ -156,7 +156,11 @@ static void send_dmrd(translator *tr, int link_idx, uint8_t flags, const uint8_t
 
     uint8_t body[53];
     memcpy(body, "DMRD", 4);
-    body[4] = (uint8_t)(tr->obp_seq_ctr[peer_idx]++ & 0xFF);
+    /* Per call, not per peer as Project Plan §16 had it: receivers check loss
+     * per stream (FreeDMR, ADN), so a counter shared by every call on the peer
+     * reads as missed packets on both calls whenever two of them overlap.
+     * MMDVMHost and the CC-CC side (§6.1) also number from 0 per call. */
+    body[4] = (uint8_t)(lr->call.obp_seq++ & 0xFF);
     wr24(body + 5, lr->call.rf_src);
     wr24(body + 8, (uint32_t)lcfg->tgid);
     /* Repeater-ID field: seed with the CC-origin source-peer. obp_send_dmrd
@@ -378,6 +382,7 @@ void translator_cccc_bon(translator *tr, int link_idx, uint32_t radio_id, uint32
     lr->call.call_start_time = ev_now(tr->loop);
     lr->call.last_activity = lr->call.call_start_time;
     lr->call.obp_seq_pos = 0;
+    lr->call.obp_seq = 0;
 
     lr->call.lc[0] = DMR_LC_OPT[0]; lr->call.lc[1] = DMR_LC_OPT[1]; lr->call.lc[2] = DMR_LC_OPT[2];
     wr24(lr->call.lc + 3, (uint32_t)lcfg->tgid);

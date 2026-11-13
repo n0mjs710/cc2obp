@@ -99,7 +99,9 @@ $(BIN): $(OBJECTS)
 #    to build valid DMRD frames) — see each file's header comment for scope.
 #  - test_reload:       §6.3 SIGHUP reload touches only the links/peers that
 #    changed — the untouched link's connection stays up and keeps bridging.
-test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c tests/test_obp_scenarios.c tests/test_reload.c
+#  - test_obp_seq:      the DMRD sequence sent to an OpenBridge peer is per
+#    call (0 at VOICE_HEAD, +1 per frame), even when calls overlap.
+test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c tests/test_obp_scenarios.c tests/test_reload.c tests/test_obp_seq.c
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_dsp tests/test_dsp.c $(DMR_SOURCES)
 	/tmp/cc2obp_test_dsp tests/dsp_vectors.txt
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_cccc_ambe tests/test_cccc_ambe.c $(CCCC_DIR)/cccc_ambe.c $(DMR_SOURCES)
@@ -110,6 +112,8 @@ test: $(BIN) tests/test_dsp.c tests/test_cccc_ambe.c tests/test_translate.c test
 	/tmp/cc2obp_test_obp_scenarios
 	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_reload tests/test_reload.c crypto.c $(DMR_SOURCES)
 	/tmp/cc2obp_test_reload
+	$(CC) $(CFLAGS) -I. -o /tmp/cc2obp_test_obp_seq tests/test_obp_seq.c
+	/tmp/cc2obp_test_obp_seq
 
 clean:
 	rm -f $(OBJECTS) $(BIN)

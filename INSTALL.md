@@ -30,9 +30,10 @@ make test
 ```
 
 This validates the DMR DSP/FEC core against golden vectors, the CC-CC AMBE
-bit-packing, and two system tests that drive the compiled binary over real
+bit-packing, and four system tests that drive the compiled binary over real
 loopback sockets (SSRC collision handling; orphaned-call and
-sequence/timestamp-gap behavior).
+sequence/timestamp-gap behavior; SIGHUP reload; per-call OpenBridge
+sequence).
 
 ## 3 — Install (as root)
 
